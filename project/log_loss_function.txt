@@ -1,0 +1,13 @@
+def balanced_logarithmic_loss_new(y_true, y_pred):
+
+    # Nc is the number of observations
+    N_1 = np.sum(y_true == 1, axis=0)
+    N_0 = np.sum(y_true == 0, axis=0)
+
+    # In order to avoid the extremes of the log function, each predicted probability 𝑝 is replaced with max(min(𝑝,1−10−15),10−15)
+    y_pred = np.maximum(np.minimum(y_pred, 1 - 1e-15), 1e-15)
+
+    # balanced logarithmic loss
+    loss_numerator = - (1/N_0) * np.sum((1 - y_true) * np.log(1-y_pred)) - (1/N_1) * np.sum(y_true * np.log(y_pred))
+
+    return loss_numerator / 2

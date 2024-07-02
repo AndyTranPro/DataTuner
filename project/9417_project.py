@@ -1,0 +1,243 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.preprocessing import StandardScaler  
+from sklearn.preprocessing import LabelEncoder 
+from sklearn.model_selection import train_test_split
+
+train_set = pd.read_csv('dataset/train.csv')
+
+# Features engineering
+
+# 1 filling up all empty cells
+
+print(train_set.columns[train_set.isnull().sum() > 0])
+# Output: Index(['BQ', 'CB', 'CC', 'DU', 'EL', 'FC', 'FL', 'FS', 'GL'], dtype='object')
+
+# To minimize the effect of the filling data, we've deceided to fill in all empty cells by the mean of the column
+
+columns_has_empty = ['BQ', 'CB', 'CC', 'DU', 'EL', 'FC', 'FL', 'FS', 'GL']
+
+train_set[columns_has_empty] = train_set[columns_has_empty].fillna(train_set[columns_has_empty].mean())
+
+
+# 2 parameters filtering
+# The idea of this phase is to remove the features that have too high or too low correlations with the target values
+
+# make the copy of the train_set, remove columns that contain strings
+train_set_copy = train_set.copy()
+train_set_copy.drop(['EJ', 'Id'], axis=1, inplace=True)
+correlation_matrix = train_set_copy.corr()
+
+class_correlations = correlation_matrix['Class']
+
+low_correlation_params = class_correlations[abs(class_correlations) < 0.04]
+
+high_correlation_params = class_correlations[abs(class_correlations) > 0.9]
+
+print("Columns with low correlation (absolute value < 0.04):")
+for column, correlation in low_correlation_params.items():
+    print(f"{column}: {abs(correlation)}")
+
+# output: 
+#   AZ: 0.013515606981951173
+#   CB: 0.014772394018243899
+#   CH: 0.008144308808507026
+#   CL: 0.016852143236700493
+#   DN: 0.008477749950987764
+#   DV: 0.015477478340990326
+#   EG: 0.024609863760996505
+#   EU: 0.03973900264478658
+#   FC: 0.030571410396380175
+#   FS: 0.0011340450175046388
+#   GH: 0.03353967779212312
+
+print("\nColumns with high correlation (absolute value > 0.8):")
+for column, correlation in high_correlation_params.items():
+    print(f"{column}: {abs(correlation)}")
+
+# output:
+#  Class: 1.0
+
+# Since there is no params that has too high correlation, we will just remove all low correlation columns
+col_drops = ['Id','AH', 'AZ','CB', 'CH','CL','CS','DN','DV','EG','EU','FC','FS','GH'] # also drop the id for future training reason
+train_set.drop(col_drops,axis=1,inplace=True) 
+
+
+# 3 Label encoding for EJ
+# Since EJ is not a numerical data column, therefore we need a way to convert it to numerical state for training purpose
+# we choose to use label encoding here
+label = LabelEncoder()
+target_cols = ['EJ'] 
+train_set[target_cols] = train_set[target_cols].apply(label.fit_transform)
+
+
+# 4 standardization
+# Since the features in this dataset is not a small number, we consider to use stanardization to 
+# scale the dataset to ensure each feature contributes relatively equal to the analysis. Also 
+# reduce the effect of outliers
+numeric_cols = [data_type for _,data_type in enumerate(train_set.select_dtypes(include=np.number).columns.tolist()) if(data_type!='Class')]
+sc = StandardScaler()
+train_set[numeric_cols] = sc.fit_transform(train_set[numeric_cols])
+
+
+# 5 split dataset into training and testing
+# Becuase we do not have the test dataset at the moment, therefore we've decided to split the provided training dataset into 
+# a new training set and a testing set
+
+# split the last "Class" feature into Y, others(params) go to X
+X = train_set.iloc[:, :-1].values 
+y = train_set.iloc[:, -1].values
+
+# # our training and testing ratio will be 8:2
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+def balanced_logarithmic_loss_new(y_true, y_pred):
+
+    # Nc is the number of observations
+    N_1 = np.sum(y_true == 1, axis=0)
+    N_0 = np.sum(y_true == 0, axis=0)
+
+    # In order to avoid the extremes of the log function, each predicted probability 𝑝 is replaced with max(min(𝑝,1−10−15),10−15)
+    y_pred = np.maximum(np.minimum(y_pred, 1 - 1e-15), 1e-15)
+
+    # balanced logarithmic loss
+    loss_numerator = - (1/N_0) * np.sum((1 - y_true) * np.log(1-y_pred)) - (1/N_1) * np.sum(y_true * np.log(y_pred))
+
+    return loss_numerator / 2
+
+# added import for XGB
+import optuna
+from optuna.visualization import plot_optimization_history, plot_param_importances
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from xgboost import XGBClassifier
+from sklearn.metrics import make_scorer, confusion_matrix, ConfusionMatrixDisplay, roc_curve, roc_auc_score
+
+# make a scorer according to the balanced log loss function defined above
+scorer = make_scorer(balanced_logarithmic_loss_new, needs_proba=True)
+
+# Define the XGBoost parameters
+params = {
+    "objective": "binary:logistic",
+    "max_depth": 10,
+    "verbosity": 0,
+    'eta': 0.09123900972866311, 
+    'max_depth': 3, 
+    'gamma': 0.19155496758925133, 
+    'colsample_bytree': 0.728182625320748, 
+    'subsample': 0.8440687156514323, 
+    'min_child_weight': 3, 
+    "tree_method": "gpu_hist",  # Use GPU for training
+    "gpu_id": 0,  # Specify GPU ID if multiple GPUs are available
+}
+
+# Create the XGBoost classifier
+xgb_model = XGBClassifier(**params)
+
+# Define the cross-validation strategy (Stratified K-Fold)
+cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+# Perform cross-validation and obtain scores
+scores = cross_val_score(xgb_model, X, y, cv=cv, scoring=scorer)
+
+# Print the mean and standard deviation of the scores
+print("Mean cross-validation score: {:.6f} ({:.6f})".format(np.mean(scores), np.std(scores)))
+
+# Define the XGBoost objective function for Optuna
+def objective(trial):
+    params = {
+        "objective": "binary:logistic",
+        "eta": trial.suggest_float("eta", 0.001, 0.1),
+        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "gamma": trial.suggest_float("gamma", 0.01, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.1, 1.0),
+        "subsample": trial.suggest_float("subsample", 0.1, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "verbosity": 0,
+        "tree_method": "gpu_hist",  # Use GPU for training
+        "gpu_id": 0,  # Specify GPU ID if multiple GPUs are available
+    }
+    
+    # Create the XGBoost classifier
+    xgb_model = XGBClassifier(**params)
+
+    # Perform cross-validation and obtain scores
+    scores = cross_val_score(xgb_model, X, y, cv=cv, scoring=scorer)
+
+    # Return the mean score as the objective value for Optuna
+    return np.mean(scores)
+
+# Define the study and optimize the objective function
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=100)
+
+# Visualize all trials
+fig = plot_optimization_history(study)
+fig.show()
+
+# Visualize the hyperparameter importances
+fig = plot_param_importances(study)
+fig.show()
+
+# Print the best trial and its parameters
+best_params = {
+    "objective": "binary:logistic"
+}
+best_trial = study.best_trial
+print("Best trial:")
+print("  Value: {:.6f}".format(best_trial.value))
+print("  Params: ")
+for key, value in best_trial.params.items():
+    print(f"\t{key}: {value}")
+    best_params[key] = value
+
+# Apply the best trial params to create the model
+xgb = XGBClassifier(**best_params)
+
+# Fit the model on the training data
+xgb.fit(X, y)
+
+# Get the predictions according to the X_test
+y_pred = xgb.predict(X_test)
+
+# Output the predicted probabilities for each class
+y_proba = xgb.predict_proba(X_test)
+y_proba_0 = y_proba[:, 0]
+y_proba_1 = y_proba[:, 1]
+
+# Plot confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+cm_display = ConfusionMatrixDisplay(confusion_matrix = cm, display_labels = [0, 1])
+cm_display.plot()
+plt.savefig('confusion_matrix.png')
+plt.close()
+
+# Plot the ROC curve
+fpr, tpr, _ = roc_curve(y_test,  y_proba_1)
+auc = roc_auc_score(y_test, y_proba_1)
+
+# create ROC curve
+plt.plot(fpr,tpr,label=f"AUC = {auc}")
+plt.ylabel('True Positive Rate')
+plt.xlabel('False Positive Rate')
+plt.legend(loc=4)
+plt.savefig('roc_curve.png')
+plt.close()
+
+print("Predictions:")
+print(y_proba_1)
+print("Actual values:")
+print(y_test)
+print(f"The log loss: {balanced_logarithmic_loss_new(y_test, y_proba_1)}")
+
+# Extract the values form confusion matrix
+true_negatives = cm[0, 0]
+false_positives = cm[0, 1]
+false_negatives = cm[1, 0]
+true_positives = cm[1, 1]
+
+# calculate sensitivity and specificity
+sensitivity = true_positives / (true_positives + false_negatives)
+specificity = true_negatives / (true_negatives + false_positives)
+print(f"The average sensitivity: {sensitivity}")
+print(f"The average specificity: {specificity}")
